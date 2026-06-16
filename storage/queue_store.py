@@ -1,0 +1,461 @@
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .db import get_connection, get_db_path, init_db
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CaseRecord:
+    case_id: str
+    patient_code: str | None
+    status: str
+    payload: dict[str, Any]
+    final_result: str | None
+    created_at: str
+    updated_at: str
+
+
+def insert_case(
+    *,
+    case_id: str,
+    patient_code: str | None,
+    status: str,
+    payload: dict[str, Any],
+    final_result: str | None = None,
+    db_path: Path | None = None,
+) -> None:
+    init_db(db_path)
+    now = _now()
+    with get_connection(db_path or get_db_path()) as connection:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO cases (
+                case_id,
+                patient_code,
+                status,
+                payload,
+                final_result,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                case_id,
+                patient_code,
+                status,
+                json.dumps(payload),
+                final_result,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+    if status == "pending":
+        from .queue_engine import recompute_queue
+
+        recompute_queue(
+            db_path=db_path,
+            reason="case_inserted",
+            trigger_case_id=case_id,
+        )
+
+
+def get_next_pending_case(db_path: Path | None = None) -> CaseRecord | None:
+    init_db(db_path)
+    with get_connection(db_path or get_db_path()) as connection:
+        row = connection.execute(
+            """
+            SELECT case_id, patient_code, status, payload, final_result, created_at, updated_at
+            FROM cases
+            WHERE status = 'pending'
+              AND patient_code IS NOT NULL
+              AND TRIM(patient_code) != ''
+            ORDER BY
+              CASE WHEN queue_rank IS NULL THEN 1 ELSE 0 END ASC,
+              queue_rank ASC,
+              created_at ASC,
+              case_id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+    return _row_to_case_record(row)
+
+
+def get_case(case_id: str, db_path: Path | None = None) -> CaseRecord | None:
+    init_db(db_path)
+    with get_connection(db_path or get_db_path()) as connection:
+        row = connection.execute(
+            """
+            SELECT case_id, patient_code, status, payload, final_result, created_at, updated_at
+            FROM cases
+            WHERE case_id = ?
+            """,
+            (case_id,),
+        ).fetchone()
+    return _row_to_case_record(row)
+
+
+def mark_routed(case_id: str, db_path: Path | None = None) -> None:
+    _update_status(case_id, "routed", db_path=db_path)
+    from .queue_engine import recompute_queue
+
+    recompute_queue(db_path=db_path, reason="case_routed", trigger_case_id=case_id)
+
+
+def mark_reviewed(case_id: str, db_path: Path | None = None) -> None:
+    _update_status(case_id, "reviewed", db_path=db_path)
+
+
+def mark_escalated(case_id: str, db_path: Path | None = None) -> None:
+    _update_escalation(
+        case_id,
+        status="escalated",
+        human_status="pending",
+        db_path=db_path,
+    )
+
+
+def mark_escalated_with_handoff(
+    case_id: str,
+    *,
+    handoff_packet: str,
+    due_at: str | None = None,
+    db_path: Path | None = None,
+) -> None:
+    _update_escalation(
+        case_id,
+        status="escalated",
+        human_status="pending",
+        handoff_packet=handoff_packet,
+        due_at=due_at,
+        db_path=db_path,
+    )
+
+
+def mark_completed(
+    case_id: str,
+    final_result: str,
+    db_path: Path | None = None,
+) -> None:
+    init_db(db_path)
+    with get_connection(db_path or get_db_path()) as connection:
+        connection.execute(
+            """
+            UPDATE cases
+            SET status = ?, final_result = ?, updated_at = ?
+            WHERE case_id = ?
+            """,
+            ("completed", final_result, _now(), case_id),
+        )
+        connection.commit()
+    logger.info("CASE_COMPLETED case_id=%s", case_id)
+    from .queue_engine import recompute_queue
+
+    recompute_queue(
+        db_path=db_path,
+        reason="case_completed",
+        trigger_case_id=case_id,
+    )
+
+
+def apply_human_decision(
+    case_id: str,
+    *,
+    decision: str,
+    notes: str | None = None,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    init_db(db_path)
+    now = _now()
+    with get_connection(db_path or get_db_path()) as connection:
+        row = connection.execute(
+            """
+            SELECT case_id, patient_code, status, payload, human_packet, human_due_at
+            FROM cases
+            WHERE case_id = ?
+            """,
+            (case_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["status"] != "escalated":
+            logger.info(
+                "HUMAN_DECISION_SKIPPED case_id=%s status=%s",
+                case_id,
+                row["status"],
+            )
+            return None
+
+        if decision == "approve":
+            result = {
+                "message_type": "human_decision_result",
+                "case_id": case_id,
+                "decision": decision,
+                "outcome": "completed",
+                "summary": f"Human approved escalated case {case_id}.",
+                "notes": notes,
+            }
+            connection.execute(
+                """
+                UPDATE cases
+                SET status = ?,
+                    final_result = ?,
+                    human_status = ?,
+                    human_decision = ?,
+                    human_decision_notes = ?,
+                    human_decided_at = ?,
+                    updated_at = ?
+                WHERE case_id = ?
+                """,
+                (
+                    "completed",
+                    json.dumps(result),
+                    "approved",
+                    decision,
+                    notes,
+                    now,
+                    now,
+                    case_id,
+                ),
+            )
+            connection.commit()
+            logger.info("HUMAN_DECISION_APPLIED case_id=%s decision=%s", case_id, decision)
+            from .queue_engine import recompute_queue
+
+            recompute_queue(db_path=db_path, reason="human_approval", trigger_case_id=case_id)
+            return result
+
+        result = {
+            "message_type": "human_decision_result",
+            "case_id": case_id,
+            "decision": decision,
+            "outcome": "returned_to_review",
+            "summary": f"Human returned escalated case {case_id} to review.",
+            "notes": notes,
+        }
+        connection.execute(
+            """
+            UPDATE cases
+            SET status = ?,
+                final_result = NULL,
+                human_status = ?,
+                human_decision = ?,
+                human_decision_notes = ?,
+                human_decided_at = ?,
+                updated_at = ?
+            WHERE case_id = ?
+            """,
+            (
+                "pending",
+                "returned_to_review",
+                decision,
+                notes,
+                now,
+                now,
+                case_id,
+            ),
+        )
+        connection.commit()
+    logger.info("HUMAN_DECISION_APPLIED case_id=%s decision=%s", case_id, decision)
+    from .queue_engine import recompute_queue
+
+    recompute_queue(db_path=db_path, reason="human_return_to_review", trigger_case_id=case_id)
+    return result
+
+
+def expire_human_reviews(
+    *,
+    due_before: datetime | None = None,
+    db_path: Path | None = None,
+) -> list[str]:
+    init_db(db_path)
+    cutoff = due_before or datetime.now(timezone.utc)
+    now = _now()
+    expired: list[str] = []
+    with get_connection(db_path or get_db_path()) as connection:
+        rows = connection.execute(
+            """
+            SELECT case_id, human_due_at
+            FROM cases
+            WHERE status = 'escalated'
+              AND COALESCE(human_status, 'pending') = 'pending'
+              AND human_due_at IS NOT NULL
+            """,
+        ).fetchall()
+        for row in rows:
+            due_at = _parse_datetime(row["human_due_at"])
+            if due_at is None or due_at > cutoff:
+                continue
+            case_id = row["case_id"]
+            expired.append(case_id)
+            result = {
+                "message_type": "human_decision_result",
+                "case_id": case_id,
+                "decision": "approve",
+                "outcome": "timed_out",
+                "summary": f"Human decision timed out for case {case_id}.",
+                "notes": "Timed out before human response",
+            }
+            connection.execute(
+                """
+                UPDATE cases
+                SET status = ?,
+                    final_result = ?,
+                    human_status = ?,
+                    human_decision = ?,
+                    human_decision_notes = ?,
+                    human_decided_at = ?,
+                    updated_at = ?
+                WHERE case_id = ?
+                """,
+                (
+                    "completed",
+                    json.dumps(result),
+                    "timed_out",
+                    "timeout",
+                    "Timed out before human response",
+                    now,
+                    now,
+                    case_id,
+                ),
+            )
+        connection.commit()
+    if expired:
+        from .queue_engine import recompute_queue
+
+        recompute_queue(db_path=db_path, reason="human_timeout", trigger_case_id=expired[-1])
+    return expired
+
+
+def reset_case(case_id: str, db_path: Path | None = None) -> None:
+    init_db(db_path)
+    with get_connection(db_path or get_db_path()) as connection:
+        connection.execute(
+            """
+            UPDATE cases
+            SET status = ?, final_result = NULL, updated_at = ?
+            WHERE case_id = ?
+            """,
+            ("pending", _now(), case_id),
+        )
+        connection.commit()
+    logger.info("CASE_RESET case_id=%s", case_id)
+    from .queue_engine import recompute_queue
+
+    recompute_queue(db_path=db_path, reason="case_reset", trigger_case_id=case_id)
+
+
+def update_case_payload(
+    case_id: str,
+    payload_updates: dict[str, Any],
+    db_path: Path | None = None,
+) -> None:
+    init_db(db_path)
+    with get_connection(db_path or get_db_path()) as connection:
+        row = connection.execute(
+            "SELECT payload, patient_code FROM cases WHERE case_id = ?",
+            (case_id,),
+        ).fetchone()
+        if row is None:
+            return
+
+        payload = json.loads(row["payload"])
+        payload.update(payload_updates)
+        patient_code = (
+            payload_updates.get("patient_code")
+            or row["patient_code"]
+        )
+        connection.execute(
+            """
+            UPDATE cases
+            SET payload = ?, patient_code = ?, updated_at = ?
+            WHERE case_id = ?
+            """,
+            (json.dumps(payload), patient_code, _now(), case_id),
+        )
+        connection.commit()
+
+
+def _update_status(case_id: str, status: str, db_path: Path | None = None) -> None:
+    init_db(db_path)
+    with get_connection(db_path or get_db_path()) as connection:
+        connection.execute(
+            """
+            UPDATE cases
+            SET status = ?, updated_at = ?
+            WHERE case_id = ?
+            """,
+            (status, _now(), case_id),
+        )
+        connection.commit()
+
+
+def _update_escalation(
+    case_id: str,
+    *,
+    status: str,
+    human_status: str | None,
+    handoff_packet: str | None = None,
+    due_at: str | None = None,
+    db_path: Path | None = None,
+) -> None:
+    init_db(db_path)
+    with get_connection(db_path or get_db_path()) as connection:
+        connection.execute(
+            """
+            UPDATE cases
+            SET status = ?,
+                human_packet = COALESCE(?, human_packet),
+                human_status = ?,
+                human_due_at = COALESCE(?, human_due_at),
+                human_decision = NULL,
+                human_decision_notes = NULL,
+                human_decided_at = NULL,
+                updated_at = ?
+            WHERE case_id = ?
+            """,
+            (
+                status,
+                handoff_packet,
+                human_status,
+                due_at,
+                _now(),
+                case_id,
+            ),
+        )
+        connection.commit()
+
+
+def _row_to_case_record(row: Any) -> CaseRecord | None:
+    if row is None:
+        return None
+    return CaseRecord(
+        case_id=row["case_id"],
+        patient_code=row["patient_code"],
+        status=row["status"],
+        payload=json.loads(row["payload"]),
+        final_result=row["final_result"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
