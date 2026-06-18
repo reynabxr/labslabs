@@ -12,7 +12,7 @@ os.environ["SSL_CERT_FILE"] = certifi.where()
 from band import Agent
 from band.config import load_agent_config
 
-from .review_adapter import CTReviewAdapter
+from .moderator_adapter import CTModeratorAdapter
 from storage.db import get_db_path
 
 logging.basicConfig(level=logging.INFO)
@@ -28,11 +28,13 @@ def _required_env(name: str) -> str:
 
 async def main() -> None:
     load_dotenv()
-    agent_id, api_key = load_agent_config("ct_review_agent")
-    adapter = CTReviewAdapter(
-        review_mention=os.getenv("CT_REVIEW_MENTION", "@ct_review_agent"),
+    agent_id, api_key = load_agent_config("ct_moderator_agent")
+    adapter = CTModeratorAdapter(
         moderator_mention=os.getenv(
             "CT_MODERATOR_MENTION", "@ct_moderator_agent"
+        ),
+        escalation_mention=os.getenv(
+            "CT_ESCALATION_MENTION", "@ct_escalation_agent"
         ),
     )
     agent = Agent.create(
@@ -42,8 +44,8 @@ async def main() -> None:
         ws_url=_required_env("THENVOI_WS_URL"),
         rest_url=_required_env("THENVOI_REST_URL"),
     )
-    logger.info("CT Review Agent using SQLite DB at %s", get_db_path())
-    logger.info("CT Review Agent is running. Press Ctrl+C to stop.")
+    logger.info("CT Moderator Agent using SQLite DB at %s", get_db_path())
+    logger.info("CT Moderator Agent is running. Press Ctrl+C to stop.")
     await agent.run()
 
 

@@ -44,6 +44,7 @@ async def dispatch_next_pending_case() -> dict[str, Any] | None:
     dispatcher_agent_id, dispatcher_api_key = load_agent_config("ct_dispatcher_agent")
     router_agent_id, _ = load_agent_config("ct_router_agent")
     review_agent_id, _ = load_agent_config("ct_review_agent")
+    moderator_agent_id, _ = load_agent_config("ct_moderator_agent")
     escalation_agent_id, _ = load_agent_config("ct_escalation_agent")
     rest_url = _required_env("THENVOI_REST_URL")
 
@@ -53,6 +54,7 @@ async def dispatch_next_pending_case() -> dict[str, Any] | None:
         dispatcher_agent_id=dispatcher_agent_id,
         router_agent_id=router_agent_id,
         review_agent_id=review_agent_id,
+        moderator_agent_id=moderator_agent_id,
         escalation_agent_id=escalation_agent_id,
         case_id=pending_case.case_id,
     )
@@ -83,6 +85,7 @@ async def create_dispatch_room(
     dispatcher_agent_id: str,
     router_agent_id: str,
     review_agent_id: str,
+    moderator_agent_id: str,
     escalation_agent_id: str,
     case_id: str,
 ) -> str:
@@ -96,6 +99,7 @@ async def create_dispatch_room(
     for participant_id in (
         router_agent_id,
         review_agent_id,
+        moderator_agent_id,
         escalation_agent_id,
     ):
         await dispatch_client.agent_api_participants.add_agent_chat_participant(

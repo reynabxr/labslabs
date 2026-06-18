@@ -8,7 +8,8 @@ Band is used for agent coordination. SQLite stores the queue, case state, and hu
 
 - `ct_dispatcher_agent` opens a Band room for the next queued case.
 - `ct_router_agent` normalizes the case and posts structured `case` JSON.
-- `ct_review_agent` uses LangGraph to compare the incoming case against the current queue snapshot.
+- `ct_review_agent` uses LangGraph and optional LLM refinement to emit single-case clinical urgency signals.
+- `ct_moderator_agent` uses LangGraph and optional LLM placement reasoning to evaluate queue placement against the current queue context.
 - `ct_escalation_agent` handles cases that need human review and posts a handoff packet.
 
 ## Human Review
@@ -27,6 +28,23 @@ python3 scripts/expire_human_reviews.py
 ```
 
 ## Queue Flow
+
+The CT queue is simulation-based. The dataset does not need CT order arrival or
+completion timestamps. Queue state is driven by a persistent simulation clock:
+`current_tick` advances when a case enters, a placement/reorder is applied, or
+the top case completes. Active queue snapshots expose `queue_position`,
+`previous_position`, `rank_change`, `queue_version`, `arrival_seq`,
+`enqueue_tick`, `start_tick`, `completion_tick`, and `waiting_ticks`.
+
+Only the case at queue position 1 may complete. Completion removes that case
+from the active queue, shifts the remaining cases upward, increments
+`queue_version`, and logs queue events with `simulation_tick` and
+`affected_case_ids`.
+
+The queue engine applies moderator placement decisions deterministically. The
+review LLM decides clinical urgency and the moderator LLM decides placement and
+escalation; the queue engine only rewrites the stored queue state to match that
+decision.
 
 Process the next queued case:
 
@@ -60,6 +78,7 @@ Start the Band-backed agents:
 ```bash
 python3 -m agents.run_router
 python3 -m agents.run_review
+python3 -m agents.run_moderator
 python3 -m agents.run_escalation
 ```
 

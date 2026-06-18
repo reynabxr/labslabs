@@ -32,6 +32,17 @@ def insert_case(
     final_result: str | None = None,
     db_path: Path | None = None,
 ) -> None:
+    if status == "pending":
+        from .queue_engine import enqueue_case
+
+        enqueue_case(
+            case_id=case_id,
+            patient_code=patient_code,
+            payload=payload,
+            db_path=db_path,
+        )
+        return
+
     init_db(db_path)
     now = _now()
     with get_connection(db_path or get_db_path()) as connection:
@@ -58,14 +69,6 @@ def insert_case(
             ),
         )
         connection.commit()
-    if status == "pending":
-        from .queue_engine import recompute_queue
-
-        recompute_queue(
-            db_path=db_path,
-            reason="case_inserted",
-            trigger_case_id=case_id,
-        )
 
 
 def get_next_pending_case(db_path: Path | None = None) -> CaseRecord | None:
@@ -145,6 +148,23 @@ def mark_completed(
     final_result: str,
     db_path: Path | None = None,
 ) -> None:
+    from .queue_engine import complete_top_case
+
+    case_record = get_case(case_id, db_path=db_path)
+    if case_record is not None and case_record.status == "pending":
+        top_case = get_next_pending_case(db_path=db_path)
+        if top_case is None:
+            return
+        if top_case.case_id != case_id:
+            raise ValueError(
+                f"Only the top queued case can complete; requested {case_id}, top is {top_case.case_id}"
+            )
+        top_result = complete_top_case(final_result=final_result, db_path=db_path)
+        if top_result is None:
+            return
+        logger.info("CASE_COMPLETED case_id=%s", case_id)
+        return
+
     init_db(db_path)
     with get_connection(db_path or get_db_path()) as connection:
         connection.execute(
@@ -157,13 +177,66 @@ def mark_completed(
         )
         connection.commit()
     logger.info("CASE_COMPLETED case_id=%s", case_id)
-    from .queue_engine import recompute_queue
 
-    recompute_queue(
-        db_path=db_path,
-        reason="case_completed",
-        trigger_case_id=case_id,
-    )
+
+def log_moderator_decision(
+    case_id: str,
+    *,
+    decision: dict[str, Any],
+    db_path: Path | None = None,
+) -> None:
+    init_db(db_path)
+    with get_connection(db_path or get_db_path()) as connection:
+        connection.execute(
+            """
+            INSERT INTO queue_events (
+                queue_version,
+                event_type,
+                case_id,
+                details,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                None,
+                "moderator_decision",
+                case_id,
+                json.dumps(decision),
+                _now(),
+            ),
+        )
+        connection.commit()
+    logger.info("MODERATOR_DECISION_LOGGED case_id=%s", case_id)
+
+
+def log_clinical_urgency(
+    case_id: str,
+    *,
+    decision: dict[str, Any],
+    db_path: Path | None = None,
+) -> None:
+    init_db(db_path)
+    with get_connection(db_path or get_db_path()) as connection:
+        connection.execute(
+            """
+            INSERT INTO queue_events (
+                queue_version,
+                event_type,
+                case_id,
+                details,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                None,
+                "clinical_urgency_determined",
+                case_id,
+                json.dumps(decision, sort_keys=True),
+                _now(),
+            ),
+        )
+        connection.commit()
+    logger.info("CLINICAL_URGENCY_LOGGED case_id=%s", case_id)
 
 
 def apply_human_decision(

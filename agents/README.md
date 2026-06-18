@@ -8,54 +8,91 @@ One Band room represents one CT case. The agents do not call each other directly
 
 - `ct_dispatcher_agent`: opens the next pending case in a fresh Band room.
 - `ct_router_agent`: plain Python agent that loads and normalizes the case, preserves `case_id` and `patient_code`, computes provisional urgency metadata, marks pending cases `routed`, and sends structured `case` JSON to the review agent.
-- `ct_review_agent`: LangGraph agent that reviews the incoming case against the current SQLite queue snapshot and emits structured queue placement guidance.
-- `ct_escalation_agent`: receives review messages that need human review, marks the case `escalated`, and publishes a human handoff packet with explicit choices.
-
-No moderator agent is used in this workflow.
+- `ct_review_agent`: LangGraph agent that reviews the incoming case on its own and emits structured clinical urgency signals, with optional LLM refinement for urgency, confidence, red flags, and the short reasoning summary.
+- `ct_moderator_agent`: LangGraph agent that receives the reviewed case plus clinical urgency result, loads queue context, performs nearby comparisons, and emits a structured moderator decision, with optional LLM ownership of the final placement and escalation choice.
+- `ct_escalation_agent`: receives moderator decisions that need human review, marks the case `escalated`, and publishes a human handoff packet with explicit choices.
 
 ## Review Logic
 
-`ct_review_agent` receives the structured `message_type: "case"` JSON from the router. It does not chat with the user and does not invent missing data.
+`ct_review_agent` receives the structured `message_type: "case"` JSON from the router. It does not chat with the user, does not invent missing data, does not compare cases, and does not decide final queue placement or human escalation.
 
 The review graph is:
 
 ```text
 ingest_case
-load_queue_snapshot
-assess_clinical_risk
-assess_queue_position
-decide_recommendation
+assess_red_flags
+assess_physiologic_instability
+assess_missingness
+synthesize_urgency
 emit_structured_result
 ```
 
-The agent loads the current pending queue from SQLite through the existing queue engine, compares the incoming case against nearby cases, and returns a recommendation.
+The agent uses the chief complaint description when present, coded chart fields, vitals, AVPU, age, router-provided missing fields, and provisional urgency metadata to produce clinical urgency signals. It treats complaint codes as coded identifiers unless a supported description is present.
 
-For a brand-new case, the review result does not use `rank_change` as the primary recommendation. The review result instead reports:
+The review LLM, when enabled, can refine:
 
-- `proposed_rank`
-- `queue_action`
-- `affected_case_ids`
-- `recommended_next_route`
+- `clinical_urgency`
+- `confidence`
+- `red_flags`
+- `missing_information`
+- `reasoning_summary`
 
-The queue engine remains responsible for actual queue recomputation and rank-change persistence after the review step.
+The review LLM should keep the reasoning simple and brief. It sees only the
+structured case JSON, not a deterministic rule summary. Missingness should be
+clinically meaningful only for identity fields such as missing `patient_code`
+or `case_id`; routine absent vitals or chart fields should not be treated as
+concerning by themselves.
+
+The queue engine remains responsible for queue recomputation and rank-change persistence. The review agent does not write queue positions to SQLite.
+
+After producing `clinical_urgency`, the review agent forwards a `moderator_input` packet containing both the original `case` and the `clinical_urgency` result to `ct_moderator_agent`.
+
+## Moderator Logic
+
+`ct_moderator_agent` receives `message_type: "moderator_input"` and runs the queue-aware moderation workflow. It loads the current pending queue from SQLite, performs binary-search comparisons against nearby queue neighbors, and passes the case, clinical urgency, queue context, and comparison history into the moderator LLM. Pairwise comparison is limited to nearby cases above and below the proposed insertion point.
+
+The pairwise comparator still performs the binary-search comparisons between
+the new case and nearby queue cases. The comparator and the moderator LLM see
+only the structured case and queue context, not deterministic rank heuristics
+or insertion hints. The final moderator LLM decides the placement action,
+anchor case, whether human review is needed, and the short reason summary. The
+queue engine only applies that decision deterministically.
+
+The moderator emits a `moderator_decision` JSON packet:
+
+```json
+{
+  "message_type": "moderator_decision",
+  "case_id": "13960219003",
+  "patient_code": "9608665.0",
+  "clinical_urgency": "HIGH",
+  "confidence": 0.84,
+  "placement_action": "insert_before",
+  "anchor_case_id": "13960219005",
+  "comparison_count": 2,
+  "needs_human_review": false,
+  "reason_summary": "clinical_urgency=HIGH; confidence=0.84; placement_action=insert_before; comparisons=2",
+  "recommended_next_route": "queue_engine_apply",
+  "comparison_history": [],
+  "queue_snapshot": []
+}
+```
+
+If `needs_human_review` is true, `ct_moderator_agent` sends the moderator decision to `ct_escalation_agent`, which remains responsible for human handoff formatting. Otherwise the moderator decision is stored as the final result and the queue engine applies the requested placement deterministically.
 
 Example review output:
 
 ```json
 {
-  "message_type": "review",
+  "message_type": "clinical_urgency",
   "case_id": "13960219003",
   "patient_code": "9608665.0",
-  "clinical_risk": "HIGH",
-  "confidence": 0.82,
-  "queue_assessment": "UNDER_RANKED",
-  "proposed_rank": 1,
-  "queue_action": "insert",
-  "affected_case_ids": ["13960219005", "13960219002"],
-  "needs_human_review": false,
-  "summary": "Case 13960219003 is recommended for insertion at rank 1 after comparison with nearby cases.",
-  "recommended_next_route": "final_result",
-  "review_reasoning_summary": "risk=HIGH; urgency_score=8; signals=low_spo2"
+  "clinical_urgency": "HIGH",
+  "confidence": 0.84,
+  "red_flags": ["low_spo2", "abnormal_avpu"],
+  "missing_information": ["patient_code"],
+  "reasoning_summary": "urgency=HIGH; urgency_score=8; red_flags=low_spo2,abnormal_avpu; missing=patient_code",
+  "recommended_next_route": "moderator"
 }
 ```
 
@@ -100,7 +137,9 @@ CREATE TABLE cases (
 );
 ```
 
-The database also includes a `queue_events` audit table for queue recomputation events.
+The database also includes a `queue_events` audit table for queue
+recomputation events, clinical urgency decisions, moderator decisions, and
+queue placement application events.
 
 Status values:
 
@@ -125,7 +164,10 @@ Optional:
 
 ```bash
 CASES_DB_PATH=/absolute/path/to/cases.db
-CT_REVIEW_CONFIDENCE_THRESHOLD=0.65
+CT_REVIEW_MODEL=deepseek-v4-flash
+AIML_API_KEY=...
+AIML_BASE_URL=https://api.aimlapi.com/v1
+CT_REVIEW_USE_LLM=1
 CT_HUMAN_REVIEW_TIMEOUT_MINUTES=15
 ```
 
@@ -135,6 +177,7 @@ Band credentials must be available through the Band SDK config loader for these 
 ct_dispatcher_agent
 ct_router_agent
 ct_review_agent
+ct_moderator_agent
 ct_escalation_agent
 ```
 
@@ -143,6 +186,7 @@ Optional mention overrides:
 ```bash
 CT_ROUTER_MENTION=@ct_router_agent
 CT_REVIEW_MENTION=@ct_review_agent
+CT_MODERATOR_MENTION=@ct_moderator_agent
 CT_ESCALATION_MENTION=@ct_escalation_agent
 ```
 
@@ -162,6 +206,7 @@ Start each process in a separate terminal:
 ```bash
 python3 -m agents.run_router
 python3 -m agents.run_review
+python3 -m agents.run_moderator
 python3 -m agents.run_escalation
 ```
 
@@ -186,9 +231,10 @@ python3 scripts/seed_one_case.py --row-number 2
 python3 scripts/seed_one_case.py --case-id 13960219002 --force-escalation
 ```
 
-This proof creates a fresh Band room for each queued case it starts. The SQLite `case_id` is carried in the Band message payload, not in the Band `task_id` field. The dispatch script posts the `queue_trigger` automatically from the SQLite queue using a dedicated `ct_dispatcher_agent`, then the three workflow agents handle the rest.
+This proof creates a fresh Band room for each queued case it starts. The SQLite `case_id` is carried in the Band message payload, not in the Band `task_id` field. The dispatch script posts the `queue_trigger` automatically from the SQLite queue using a dedicated `ct_dispatcher_agent`, then the four workflow agents handle the rest.
 
-`CT_REVIEW_CONFIDENCE_THRESHOLD` controls when `ct_review_agent` asks for human review. Lower values keep more valid-but-partial cases on the automatic path.
+`CT_REVIEW_USE_LLM` can be set to `0` to disable the optional AIML API / DeepSeek review refinement. When credentials are present, the review graph uses the LLM path by default and falls back to the deterministic path if the call fails.
+`CT_MODERATOR_USE_LLM` can be set to `0` to disable the moderator-side LLM placement reasoning. When credentials are present, the moderator graph uses the LLM path by default and falls back to the deterministic path if the call fails.
 `CT_HUMAN_REVIEW_TIMEOUT_MINUTES` sets the due time for a human decision. Overdue escalations are expired by `scripts/expire_human_reviews.py` and also when the dispatch bridge runs.
 Human decisions are recorded by `scripts/human_decision.py`, so no human UUID is required.
 
@@ -197,11 +243,11 @@ Human decisions are recorded by `scripts/human_decision.py`, so no human UUID is
 Expected flow for the first seeded case:
 
 1. Router posts a `case` JSON message mentioning `@ct_review_agent`.
-2. Review loads the current queue snapshot, compares the incoming case with nearby pending cases, and emits a structured `review` JSON result.
-3. If the review needs human review, Review posts the `review` JSON message mentioning `@ct_escalation_agent`.
-4. Escalation posts a `human_handoff` JSON packet with explicit actions and leaves the case in `escalated`.
-5. A human operator runs `scripts/human_decision.py` to approve the case or return it to review.
-6. SQLite stores the final JSON in `final_result` and sets `status = completed` when the case completes.
+2. Review assesses only that case and produces a structured `clinical_urgency` result, with the LLM optionally refining the urgency, confidence, red flags, and short reasoning.
+3. Review sends a `moderator_input` JSON packet mentioning `@ct_moderator_agent`.
+4. Moderator loads queue context, performs nearby pairwise comparisons, and asks the moderator LLM to choose placement and escalation.
+5. If escalation is needed, Moderator sends the moderator decision to `ct_escalation_agent`.
+6. Otherwise SQLite stores the moderator decision in `final_result`, and the queue engine applies the chosen placement deterministically.
 
 The remaining seeded cases stay `pending` until `process_next_case.py` is run again.
 
@@ -222,5 +268,5 @@ python3 scripts/expire_human_reviews.py
 Compile the changed workflow:
 
 ```bash
-.venv/bin/python3 -m py_compile agents/review_agent.py agents/shared_schema.py agents/review_adapter.py agents/run_review.py agents/escalation_agent.py agents/escalation_adapter.py agents/run_escalation.py scripts/expire_human_reviews.py scripts/mock_queue_flow.py src/labslabs/band_dispatch.py storage/queue_store.py storage/db.py
+.venv/bin/python3 -m py_compile agents/review_agent.py agents/review_schema.py agents/review_graph.py agents/review_prompts.py agents/moderator_agent.py agents/moderator_schema.py agents/moderator_logic.py agents/moderator_graph.py agents/moderator_adapter.py agents/shared_schema.py agents/review_adapter.py agents/run_review.py agents/run_moderator.py agents/escalation_agent.py agents/escalation_adapter.py agents/run_escalation.py scripts/expire_human_reviews.py scripts/mock_queue_flow.py src/labslabs/band_dispatch.py storage/queue_store.py storage/db.py
 ```

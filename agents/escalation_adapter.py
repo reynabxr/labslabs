@@ -6,6 +6,7 @@ from band.core import AgentToolsProtocol, HistoryProvider, PlatformMessage, Simp
 
 from .band_utils import sender_mention
 from .escalation_agent import create_human_handoff
+from .moderator_schema import ModeratorDecisionMessage
 from .shared_schema import ReviewMessage, model_to_json, parse_json_object
 from storage.queue_store import mark_escalated_with_handoff
 
@@ -34,11 +35,16 @@ class CTEscalationAdapter(SimpleAdapter[HistoryProvider]):
     ) -> None:
         try:
             payload = parse_json_object(msg.content)
-            if payload.get("message_type") != "review":
+            message_type = payload.get("message_type")
+            if message_type not in {"review", "moderator_decision"}:
                 if _is_intended_for(msg.content, self.escalation_mention):
-                    raise ValueError("Expected message_type='review'")
+                    raise ValueError("Expected message_type='review' or 'moderator_decision'")
                 return
-            review = ReviewMessage.model_validate(payload)
+            review = (
+                ReviewMessage.model_validate(payload)
+                if message_type == "review"
+                else ModeratorDecisionMessage.model_validate(payload)
+            )
             if not review.needs_human_review:
                 return
         except Exception as exc:

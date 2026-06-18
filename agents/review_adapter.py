@@ -5,9 +5,10 @@ import logging
 from band.core import AgentToolsProtocol, HistoryProvider, PlatformMessage, SimpleAdapter
 
 from .band_utils import participant_mention, sender_mention
+from .moderator_schema import ModeratorInputMessage
 from .review_agent import review_case
 from .shared_schema import CaseMessage, model_to_json, parse_json_object
-from storage.queue_store import mark_completed, mark_reviewed
+from storage.queue_store import log_clinical_urgency, mark_reviewed
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +18,11 @@ class CTReviewAdapter(SimpleAdapter[HistoryProvider]):
         self,
         *,
         review_mention: str = "@ct_review_agent",
-        escalation_mention: str = "@ct_escalation_agent",
+        moderator_mention: str = "@ct_moderator_agent",
     ) -> None:
         super().__init__()
         self.review_mention = review_mention
-        self.escalation_mention = escalation_mention
+        self.moderator_mention = moderator_mention
 
     async def on_message(
         self,
@@ -52,35 +53,33 @@ class CTReviewAdapter(SimpleAdapter[HistoryProvider]):
             )
             return
 
-        review = review_case(case)
+        clinical_urgency = review_case(case)
         mark_reviewed(case.case_id)
-        logger.info(
-            "CASE_REVIEWED case_id=%s clinical_risk=%s proposed_rank=%s queue_action=%s affected_case_count=%s needs_human_review=%s",
+        log_clinical_urgency(
             case.case_id,
-            review.clinical_risk,
-            review.proposed_rank,
-            review.queue_action,
-            len(review.affected_case_ids),
-            review.needs_human_review,
+            decision=clinical_urgency.model_dump(),
         )
-        if review.needs_human_review:
-            escalation_mention = participant_mention(
-                tools,
-                self.escalation_mention,
-                "ct_escalation_agent",
-                "ct-escalation-agent",
-                "CT Escalation Agent",
-            )
-            content = (
-                f"{escalation_mention}\n```json\n{model_to_json(review)}\n```"
-            )
-            await tools.send_message(content=content, mentions=[escalation_mention])
-            return
-
-        review_json = model_to_json(review)
-        content = f"Final Result\n```json\n{review_json}\n```"
-        await tools.send_message(content=content)
-        mark_completed(case.case_id, review_json)
+        logger.info(
+            "CASE_CLINICAL_URGENCY_REVIEWED case_id=%s clinical_urgency=%s confidence=%s red_flag_count=%s reasoning_summary=%s",
+            case.case_id,
+            clinical_urgency.clinical_urgency,
+            clinical_urgency.confidence,
+            len(clinical_urgency.red_flags),
+            clinical_urgency.reasoning_summary,
+        )
+        moderator_input = ModeratorInputMessage(
+            case=case,
+            clinical_urgency=clinical_urgency,
+        )
+        moderator_mention = participant_mention(
+            tools,
+            self.moderator_mention,
+            "ct_moderator_agent",
+            "ct-moderator-agent",
+            "CT Moderator Agent",
+        )
+        content = f"{moderator_mention}\n```json\n{model_to_json(moderator_input)}\n```"
+        await tools.send_message(content=content, mentions=[moderator_mention])
 
 
 def _is_intended_for(content: str, mention: str) -> bool:

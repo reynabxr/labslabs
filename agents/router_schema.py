@@ -13,20 +13,20 @@ class CaseMessage(BaseModel):
     age: int | None = None
     gender: str | None = None
     chief_complaint_code: str | None = None
+    chief_complaint_description: str | None = None
     pain_grade: int | None = None
-    critical_status: int | None = None
-    stupor_status: int | None = None
     bp_systolic: int | None = None
     bp_diastolic: int | None = None
     pulse_rate: int | None = None
     respiratory_rate: int | None = None
     spo2: int | None = None
     avpu: str | None = None
-    triage_grade: int | None = None
     urgency_score: int
     waiting_time_minutes: int | None = None
     missing_fields: list[str] = Field(default_factory=list)
     validation_status: Literal["valid", "invalid"]
+    queue_rank: int | None = None
+    priority_score: float | None = None
     force_escalation: bool = False
 
 
@@ -37,20 +37,20 @@ class NormalizedCase(BaseModel):
     age: int | None = None
     gender: str | None = None
     chief_complaint_code: str | None = None
+    chief_complaint_description: str | None = None
     pain_grade: int | None = None
-    critical_status: int | None = None
-    stupor_status: int | None = None
     bp_systolic: int | None = None
     bp_diastolic: int | None = None
     pulse_rate: int | None = None
     respiratory_rate: int | None = None
     spo2: int | None = None
     avpu: str | None = None
-    triage_grade: int | None = None
     urgency_score: int
     waiting_time_minutes: int | None = None
     missing_fields: list[str] = Field(default_factory=list)
     validation_status: Literal["valid", "invalid"]
+    queue_rank: int | None = None
+    priority_score: float | None = None
     force_escalation: bool = False
 
 

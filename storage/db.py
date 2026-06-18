@@ -48,9 +48,32 @@ def init_db(db_path: Path | None = None) -> Path:
                 queue_version INTEGER,
                 event_type TEXT NOT NULL,
                 case_id TEXT,
+                affected_case_ids TEXT,
+                simulation_tick INTEGER,
                 details TEXT,
                 created_at TEXT NOT NULL
             )
+            """
+        )
+        _ensure_queue_event_columns(connection)
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS queue_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                current_tick INTEGER NOT NULL DEFAULT 0,
+                arrival_seq INTEGER NOT NULL DEFAULT 0,
+                queue_version INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO queue_state (
+                id,
+                current_tick,
+                arrival_seq,
+                queue_version
+            ) VALUES (1, 0, 0, 0)
             """
         )
         connection.execute(
@@ -76,6 +99,10 @@ def _ensure_case_columns(connection: sqlite3.Connection) -> None:
         ("previous_rank", "INTEGER"),
         ("rank_change", "INTEGER"),
         ("queue_version", "INTEGER"),
+        ("arrival_seq", "INTEGER"),
+        ("enqueue_tick", "INTEGER"),
+        ("start_tick", "INTEGER"),
+        ("completion_tick", "INTEGER"),
         ("manual_priority_override", "REAL"),
         ("human_packet", "TEXT"),
         ("human_status", "TEXT"),
@@ -93,4 +120,21 @@ def _ensure_case_columns(connection: sqlite3.Connection) -> None:
             continue
         connection.execute(
             f"ALTER TABLE cases ADD COLUMN {column_name} {column_type}"
+        )
+
+
+def _ensure_queue_event_columns(connection: sqlite3.Connection) -> None:
+    required_columns = [
+        ("affected_case_ids", "TEXT"),
+        ("simulation_tick", "INTEGER"),
+    ]
+    existing_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(queue_events)").fetchall()
+    }
+    for column_name, column_type in required_columns:
+        if column_name in existing_columns:
+            continue
+        connection.execute(
+            f"ALTER TABLE queue_events ADD COLUMN {column_name} {column_type}"
         )

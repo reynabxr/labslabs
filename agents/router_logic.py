@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .chief_complaint_chart import chief_complaint_description_for_code
 from .router_schema import CaseMessage, NormalizedCase, QueueTrigger, RouterDecision
 from .shared_schema import parse_json_object
 from storage.queue_store import CaseRecord
@@ -18,30 +19,30 @@ PAYLOAD_FIELD_MAP = {
     "age": ("age", "age_x"),
     "gender": ("gender", "gender_x"),
     "chief_complaint_code": ("chief_complaint_code", "ChiefComplaint"),
+    "chief_complaint_description": (
+        "chief_complaint_description",
+        "ChiefComplaintDescription",
+        "chief_complaint",
+        "complaint_description",
+    ),
     "pain_grade": ("pain_grade", "PainGrade"),
-    "critical_status": ("critical_status", "CriticalStatus"),
-    "stupor_status": ("stupor_status", "StuporStatus"),
     "bp_systolic": ("bp_systolic", "BlooddpressurSystol"),
     "bp_diastolic": ("bp_diastolic", "BlooddpressurDiastol"),
     "pulse_rate": ("pulse_rate", "PulseRate"),
     "respiratory_rate": ("respiratory_rate", "RespiratoryRate"),
     "spo2": ("spo2", "O2Saturation"),
     "avpu": ("avpu", "AVPU"),
-    "triage_grade": ("triage_grade", "TriageGrade"),
 }
 
 REQUIRED_ROUTE_FIELDS = ("case_id", "patient_code", "triage_code")
 NUMERIC_FIELDS = {
     "age",
     "pain_grade",
-    "critical_status",
-    "stupor_status",
     "bp_systolic",
     "bp_diastolic",
     "pulse_rate",
     "respiratory_rate",
     "spo2",
-    "triage_grade",
 }
 MENTION_PATTERN = re.compile(r"(?<!\S)@[A-Za-z0-9._/\-]+")
 
@@ -96,6 +97,10 @@ def normalize_case_payload(
 
     normalized["case_id"] = normalized["case_id"] or normalized["triage_code"]
     normalized["triage_code"] = normalized["triage_code"] or normalized["case_id"]
+    if not normalized.get("chief_complaint_description"):
+        normalized["chief_complaint_description"] = chief_complaint_description_for_code(
+            normalized.get("chief_complaint_code")
+        )
     normalized["force_escalation"] = _as_bool(
         payload.get("force_escalation", False)
     )
@@ -152,29 +157,16 @@ def to_case_message(case: NormalizedCase) -> CaseMessage:
 
 def compute_urgency_score(case: dict[str, Any]) -> int:
     score = 0
-    critical_status = case.get("critical_status")
-    stupor_status = case.get("stupor_status")
     avpu = (case.get("avpu") or "").upper()
-    triage_grade = case.get("triage_grade")
     pain_grade = case.get("pain_grade")
     bp_systolic = case.get("bp_systolic")
     pulse_rate = case.get("pulse_rate")
     respiratory_rate = case.get("respiratory_rate")
     spo2 = case.get("spo2")
 
-    if critical_status == 1:
-        score += 5
-    if stupor_status not in (None, 0):
-        score += 4
+
     if avpu and avpu != "A":
         score += 2
-    if triage_grade is not None:
-        if triage_grade <= 2:
-            score += 3
-        elif triage_grade == 3:
-            score += 2
-        elif triage_grade >= 4:
-            score += 1
     if pain_grade is not None:
         if pain_grade >= 7:
             score += 2

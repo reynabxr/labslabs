@@ -6,7 +6,6 @@ import json
 import logging
 import asyncio
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from _bootstrap import add_src_to_path
@@ -14,8 +13,9 @@ from _bootstrap import add_src_to_path
 add_src_to_path()
 
 from storage.db import REPO_ROOT, get_connection, init_db
-from storage.queue_engine import get_queue_snapshot, recompute_queue
-from storage.queue_store import get_next_pending_case, insert_case, mark_completed
+from storage.queue_engine import complete_top_case, enqueue_case as engine_enqueue_case
+from storage.queue_engine import get_queue_snapshot
+from storage.queue_store import get_next_pending_case, insert_case
 from labslabs.band_dispatch import dispatch_next_pending_case
 
 logging.basicConfig(level=logging.INFO)
@@ -32,17 +32,17 @@ def main() -> None:
 
     prepare_parser = subparsers.add_parser(
         "prepare",
-        help="Clean the current DB, remove rows missing patient ids, and assign mock timestamps.",
+        help="Reset active cases and initialize the simulation queue from existing DB rows.",
     )
     prepare_parser.add_argument(
         "--base-time",
-        help="UTC ISO timestamp used for the first queued case. Defaults to now minus 20 minutes.",
+        help="Deprecated; simulation queues use ticks instead of timestamps.",
     )
     prepare_parser.add_argument(
         "--spacing-minutes",
         type=int,
         default=7,
-        help="Minutes between prepared cases.",
+        help="Deprecated; simulation queues use ticks instead of timestamp spacing.",
     )
 
     enqueue_parser = subparsers.add_parser(
@@ -59,7 +59,7 @@ def main() -> None:
         "--arrived-minutes-ago",
         type=int,
         default=0,
-        help="How many minutes ago the new patient arrived.",
+        help="Deprecated; arrivals advance the simulation clock by one tick.",
     )
     enqueue_parser.add_argument(
         "--dispatch-next",
@@ -148,7 +148,6 @@ def prepare_mock_queue(
     spacing_minutes: int,
 ) -> None:
     init_db()
-    base_dt = _parse_or_default_base_time(base_time)
     with get_connection() as connection:
         connection.execute(
             """
@@ -158,37 +157,48 @@ def prepare_mock_queue(
         )
         rows = connection.execute(
             """
-            SELECT case_id
+            SELECT case_id, patient_code, payload
             FROM cases
             ORDER BY created_at ASC, case_id ASC
             """
         ).fetchall()
-        for index, row in enumerate(rows):
-            created_at = (base_dt + timedelta(minutes=index * spacing_minutes)).isoformat()
-            updated_at = (base_dt + timedelta(minutes=index * spacing_minutes + 1)).isoformat()
-            connection.execute(
-                """
-                UPDATE cases
-                SET status = 'pending',
-                    final_result = NULL,
-                    created_at = ?,
-                    updated_at = ?,
-                    queue_rank = NULL,
-                    previous_rank = NULL,
-                    rank_change = NULL,
-                    queue_version = NULL,
-                    priority_score = NULL
-                WHERE case_id = ?
-                """,
-                (created_at, updated_at, row["case_id"]),
-            )
+        connection.execute("DELETE FROM queue_events")
+        connection.execute(
+            """
+            UPDATE queue_state
+            SET current_tick = 0,
+                arrival_seq = 0,
+                queue_version = 0
+            WHERE id = 1
+            """
+        )
+        connection.execute(
+            """
+            UPDATE cases
+            SET status = 'completed',
+                final_result = NULL,
+                queue_rank = NULL,
+                previous_rank = NULL,
+                rank_change = NULL,
+                queue_version = NULL,
+                priority_score = NULL,
+                arrival_seq = NULL,
+                enqueue_tick = NULL,
+                start_tick = NULL,
+                completion_tick = NULL
+            """
+        )
         connection.commit()
 
-    result = recompute_queue(reason="mock_prepare")
+    for row in rows:
+        engine_enqueue_case(
+            case_id=row["case_id"],
+            patient_code=row["patient_code"],
+            payload=json.loads(row["payload"]),
+        )
     logger.info(
-        "MOCK_PREPARED pending_count=%s affected_cases=%s",
-        result["pending_count"],
-        ",".join(result["affected_cases"]) or "none",
+        "MOCK_PREPARED pending_count=%s simulation_clock=ticks",
+        len(rows),
     )
     print_snapshot()
 
@@ -208,9 +218,6 @@ def enqueue_case(
     if not patient_code:
         raise SystemExit("Selected CSV row has no patient id and cannot enter the mock queue")
 
-    arrived_at = datetime.now(timezone.utc) - timedelta(minutes=arrived_minutes_ago)
-    row["created_at"] = arrived_at.isoformat()
-    row["queued_at"] = arrived_at.isoformat()
     insert_case(
         case_id=(row.get("triage_code") or "").strip(),
         patient_code=patient_code,
@@ -235,7 +242,7 @@ def dequeue_top_case(*, result: str) -> None:
         logger.info("No pending cases are available to dequeue.")
         return
 
-    mark_completed(pending_case.case_id, result)
+    complete_top_case(final_result=result)
     logger.info(
         "MOCK_DEQUEUED case_id=%s patient_code=%s",
         pending_case.case_id,
@@ -292,15 +299,6 @@ def _load_row(*, case_id: str | None, row_number: int | None) -> dict[str, str]:
                 return row
     target = case_id if case_id else str(row_number)
     raise SystemExit(f"CSV row not found for selector: {target}")
-
-
-def _parse_or_default_base_time(base_time: str | None) -> datetime:
-    if base_time:
-        parsed = datetime.fromisoformat(base_time.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-    return datetime.now(timezone.utc) - timedelta(minutes=20)
 
 
 def _parse_row_numbers(raw_value: str) -> list[int]:
