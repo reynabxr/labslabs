@@ -6,26 +6,25 @@ Band is used for agent coordination. SQLite stores the queue, case state, and hu
 
 ## What Runs
 
-- `ct_dispatcher_agent` opens a Band room for the next queued case.
-- `ct_router_agent` normalizes the case and posts structured `case` JSON.
+- `ct_dispatcher_agent` is a Band service identity (not a message listener) whose API key is used to create a new Band room and add all agents for each incoming case. It is invoked programmatically by the simulation, not via a Band message.
+- `ct_router_agent` normalizes the case payload and posts structured `case` JSON to the room.
 - `ct_review_agent` uses LangGraph and optional LLM refinement to emit single-case clinical urgency signals.
-- `ct_moderator_agent` uses LangGraph and optional LLM placement reasoning to evaluate queue placement against the current queue context.
+- `ct_moderator_agent` uses LangGraph and optional LLM placement reasoning to evaluate queue placement against the current queue context. Cases with `force_escalation=True` or invalid payloads are escalated before any pairwise comparison; all other cases go through binary-search pairwise comparison and may still be escalated if model confidence is low.
 - `ct_escalation_agent` handles cases that need human review and posts a handoff packet.
 
 ## Human Review
 
-Human approval is applied out of band with:
+Escalated cases wait indefinitely until a human acts. Apply a decision with:
 
 ```bash
 python3 scripts/human_decision.py <case_id> approve
 python3 scripts/human_decision.py <case_id> return_to_review --notes "Needs another look"
 ```
 
-Overdue escalations can be expired manually with:
+- `approve` marks the case completed.
+- `return_to_review` resets the case to `pending` and stores the notes in the case payload under `human_review_notes` so agents see the context on re-processing.
 
-```bash
-python3 scripts/expire_human_reviews.py
-```
+All decisions are logged to `queue_events`.
 
 ## Queue Flow
 
@@ -81,5 +80,32 @@ python3 -m agents.run_review
 python3 -m agents.run_moderator
 python3 -m agents.run_escalation
 ```
+
+Start the Python HTTP API:
+
+```bash
+python3 -m api
+```
+
+Useful endpoints:
+
+```text
+GET /health
+GET /queue
+GET /reasoning-events
+GET /dashboard-summary
+GET /simulation/status
+POST /simulation/run
+POST /simulation/stop
+```
+
+To connect the frontend dev server to the Python API:
+
+```bash
+cd frontend
+PYTHON_API_BASE_URL=http://127.0.0.1:8000 npm run dev
+```
+
+In the dashboard, the `Run demo simulation` button starts feeding the next unused CSV cases through the Band workflow so you can watch the queue update in real time.
 
 See [agents/README.md](agents/README.md) for the full workflow, message contracts, environment variables, and test flow.

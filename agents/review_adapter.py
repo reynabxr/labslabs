@@ -7,7 +7,8 @@ from band.core import AgentToolsProtocol, HistoryProvider, PlatformMessage, Simp
 from .band_utils import participant_mention, sender_mention
 from .moderator_schema import ModeratorInputMessage
 from .review_agent import review_case
-from .shared_schema import CaseMessage, model_to_json, parse_json_object
+from .router_schema import CaseMessage
+from .shared_schema import model_to_json, parse_json_object
 from storage.queue_store import log_clinical_urgency, mark_reviewed
 
 logger = logging.getLogger(__name__)
@@ -79,7 +80,15 @@ class CTReviewAdapter(SimpleAdapter[HistoryProvider]):
             "CT Moderator Agent",
         )
         content = f"{moderator_mention}\n```json\n{model_to_json(moderator_input)}\n```"
-        await tools.send_message(content=content, mentions=[moderator_mention])
+        try:
+            await tools.send_message(content=content, mentions=[moderator_mention])
+        except ValueError as exc:
+            logger.error(
+                "MODERATOR_SEND_FAILED case_id=%s error=%s available=%s",
+                case.case_id,
+                exc,
+                [getattr(p, "handle", p) for p in tools.participants],
+            )
 
 
 def _is_intended_for(content: str, mention: str) -> bool:

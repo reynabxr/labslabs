@@ -108,9 +108,6 @@ def get_case(case_id: str, db_path: Path | None = None) -> CaseRecord | None:
 
 def mark_routed(case_id: str, db_path: Path | None = None) -> None:
     _update_status(case_id, "routed", db_path=db_path)
-    from .queue_engine import recompute_queue
-
-    recompute_queue(db_path=db_path, reason="case_routed", trigger_case_id=case_id)
 
 
 def mark_reviewed(case_id: str, db_path: Path | None = None) -> None:
@@ -239,6 +236,45 @@ def log_clinical_urgency(
     logger.info("CLINICAL_URGENCY_LOGGED case_id=%s", case_id)
 
 
+def log_human_decision(
+    connection: Any,
+    *,
+    case_id: str,
+    decision: str,
+    outcome: str,
+    notes: str | None,
+    created_at: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO queue_events (
+            queue_version,
+            event_type,
+            case_id,
+            affected_case_ids,
+            details,
+            created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            None,
+            "human_decision_applied",
+            case_id,
+            json.dumps([case_id]),
+            json.dumps(
+                {
+                    "decision": decision,
+                    "outcome": outcome,
+                    "notes": notes,
+                    "summary": f"Human decision applied: {decision.replace('_', ' ')}.",
+                },
+                sort_keys=True,
+            ),
+            created_at,
+        ),
+    )
+
+
 def apply_human_decision(
     case_id: str,
     *,
@@ -299,12 +335,32 @@ def apply_human_decision(
                     case_id,
                 ),
             )
+            log_human_decision(
+                connection,
+                case_id=case_id,
+                decision=decision,
+                outcome="completed",
+                notes=notes,
+                created_at=now,
+            )
             connection.commit()
             logger.info("HUMAN_DECISION_APPLIED case_id=%s decision=%s", case_id, decision)
-            from .queue_engine import recompute_queue
-
-            recompute_queue(db_path=db_path, reason="human_approval", trigger_case_id=case_id)
             return result
+
+        # return_to_review: reset to pending and carry notes into payload so agents see them
+        existing_payload_row = connection.execute(
+            "SELECT payload FROM cases WHERE case_id = ?", (case_id,)
+        ).fetchone()
+        updated_payload: dict[str, Any] = {}
+        if existing_payload_row and existing_payload_row["payload"]:
+            try:
+                updated_payload = json.loads(existing_payload_row["payload"])
+            except json.JSONDecodeError:
+                pass
+        if notes:
+            updated_payload["human_review_notes"] = notes
+        updated_payload["human_review_decision"] = decision
+        updated_payload["human_review_returned_at"] = now
 
         result = {
             "message_type": "human_decision_result",
@@ -317,8 +373,7 @@ def apply_human_decision(
         connection.execute(
             """
             UPDATE cases
-            SET status = ?,
-                final_result = NULL,
+            SET final_result = NULL,
                 human_status = ?,
                 human_decision = ?,
                 human_decision_notes = ?,
@@ -327,7 +382,6 @@ def apply_human_decision(
             WHERE case_id = ?
             """,
             (
-                "pending",
                 "returned_to_review",
                 decision,
                 notes,
@@ -336,11 +390,24 @@ def apply_human_decision(
                 case_id,
             ),
         )
+        log_human_decision(
+            connection,
+            case_id=case_id,
+            decision=decision,
+            outcome="returned_to_review",
+            notes=notes,
+            created_at=now,
+        )
         connection.commit()
+    insert_case(
+        case_id=case_id,
+        patient_code=row["patient_code"],
+        status="pending",
+        payload=updated_payload,
+        final_result=None,
+        db_path=db_path,
+    )
     logger.info("HUMAN_DECISION_APPLIED case_id=%s decision=%s", case_id, decision)
-    from .queue_engine import recompute_queue
-
-    recompute_queue(db_path=db_path, reason="human_return_to_review", trigger_case_id=case_id)
     return result
 
 
@@ -401,10 +468,6 @@ def expire_human_reviews(
                 ),
             )
         connection.commit()
-    if expired:
-        from .queue_engine import recompute_queue
-
-        recompute_queue(db_path=db_path, reason="human_timeout", trigger_case_id=expired[-1])
     return expired
 
 
@@ -414,16 +477,21 @@ def reset_case(case_id: str, db_path: Path | None = None) -> None:
         connection.execute(
             """
             UPDATE cases
-            SET status = ?, final_result = NULL, updated_at = ?
+            SET status = ?,
+                final_result = NULL,
+                queue_rank = NULL,
+                previous_rank = NULL,
+                rank_change = NULL,
+                queue_version = NULL,
+                start_tick = NULL,
+                completion_tick = NULL,
+                updated_at = ?
             WHERE case_id = ?
             """,
             ("pending", _now(), case_id),
         )
         connection.commit()
     logger.info("CASE_RESET case_id=%s", case_id)
-    from .queue_engine import recompute_queue
-
-    recompute_queue(db_path=db_path, reason="case_reset", trigger_case_id=case_id)
 
 
 def update_case_payload(

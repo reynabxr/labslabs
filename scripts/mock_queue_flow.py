@@ -6,17 +6,16 @@ import json
 import logging
 import asyncio
 import time
-from pathlib import Path
 
 from _bootstrap import add_src_to_path
 
 add_src_to_path()
 
 from storage.db import REPO_ROOT, get_connection, init_db
-from storage.queue_engine import complete_top_case, enqueue_case as engine_enqueue_case
+from storage.queue_engine import complete_top_case
 from storage.queue_engine import get_queue_snapshot
 from storage.queue_store import get_next_pending_case, insert_case
-from labslabs.band_dispatch import dispatch_next_pending_case
+from labslabs.band_dispatch import dispatch_case, dispatch_next_pending_case
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,7 +31,7 @@ def main() -> None:
 
     prepare_parser = subparsers.add_parser(
         "prepare",
-        help="Reset active cases and initialize the simulation queue from existing DB rows.",
+        help="Reset the simulation to an empty queue.",
     )
     prepare_parser.add_argument(
         "--base-time",
@@ -155,13 +154,6 @@ def prepare_mock_queue(
             WHERE patient_code IS NULL OR TRIM(patient_code) = ''
             """
         )
-        rows = connection.execute(
-            """
-            SELECT case_id, patient_code, payload
-            FROM cases
-            ORDER BY created_at ASC, case_id ASC
-            """
-        ).fetchall()
         connection.execute("DELETE FROM queue_events")
         connection.execute(
             """
@@ -189,16 +181,9 @@ def prepare_mock_queue(
             """
         )
         connection.commit()
-
-    for row in rows:
-        engine_enqueue_case(
-            case_id=row["case_id"],
-            patient_code=row["patient_code"],
-            payload=json.loads(row["payload"]),
-        )
     logger.info(
         "MOCK_PREPARED pending_count=%s simulation_clock=ticks",
-        len(rows),
+        0,
     )
     print_snapshot()
 
@@ -209,7 +194,7 @@ def enqueue_case(
     row_number: int | None,
     arrived_minutes_ago: int,
     dispatch_next: bool,
-) -> None:
+) -> str:
     if bool(case_id) == bool(row_number):
         raise SystemExit("Provide exactly one of --case-id or --row-number")
 
@@ -233,7 +218,8 @@ def enqueue_case(
     )
     print_snapshot()
     if dispatch_next:
-        asyncio.run(dispatch_next_pending_case())
+        asyncio.run(dispatch_case((row.get("triage_code") or "").strip()))
+    return (row.get("triage_code") or "").strip()
 
 
 def dequeue_top_case(*, result: str) -> None:
@@ -261,17 +247,18 @@ def simulate_queue(
     if not arrival_row_numbers:
         raise SystemExit("Provide at least one arrival row number")
 
+    prepare_mock_queue(base_time=None, spacing_minutes=0)
     last_departure = time.monotonic()
     for index, row_number in enumerate(arrival_row_numbers):
         if index > 0:
             time.sleep(arrival_gap_seconds)
-        enqueue_case(
+        queued_case_id = enqueue_case(
             case_id=None,
             row_number=row_number,
             arrived_minutes_ago=0,
             dispatch_next=False,
         )
-        asyncio.run(dispatch_next_pending_case())
+        asyncio.run(dispatch_case(queued_case_id))
 
         now = time.monotonic()
         if now - last_departure >= top_leave_after_seconds:

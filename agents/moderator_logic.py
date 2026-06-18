@@ -38,10 +38,17 @@ def pairwise_case_from_record(
     )
 
 
-def needs_human_review(case: PairwiseCase, clinical: ClinicalUrgencyMessage) -> bool:
+def needs_precomparison_escalation(case: PairwiseCase) -> bool:
+    """Return True for cases that must escalate before any pairwise comparison."""
     if case.force_escalation:
         return True
     if case.validation_status != "valid":
+        return True
+    return False
+
+
+def needs_human_review(case: PairwiseCase, clinical: ClinicalUrgencyMessage) -> bool:
+    if needs_precomparison_escalation(case):
         return True
     if clinical.confidence < 0.55:
         return True
@@ -69,23 +76,30 @@ def reason_summary(
     needs_review: bool,
     pairwise_failure: str | None,
 ) -> str:
-    pieces = [
-        f"clinical_urgency={clinical.clinical_urgency}",
-        f"confidence={clinical.confidence}",
-        f"placement_action={placement_action}",
-        f"comparisons={comparison_count}",
-    ]
-    if anchor_case_id:
-        pieces.append(f"anchor_case_id={anchor_case_id}")
+    placement_text = {
+        "go_to_top": "be placed at the top of the queue",
+        "insert_before": f"be placed ahead of case {anchor_case_id}" if anchor_case_id else "move upward in the queue",
+        "insert_after": f"be placed after case {anchor_case_id}" if anchor_case_id else "stay lower in the queue",
+        "go_to_bottom": "be placed at the bottom of the queue",
+        "hold_and_escalate": "be held for human review",
+    }[placement_action]
+    explanation = (
+        f"This case was assessed as {clinical.clinical_urgency.lower()} urgency "
+        f"and should {placement_text}."
+    )
+    if comparison_count > 0:
+        explanation += f" The moderator reached this placement after {comparison_count} pairwise comparison"
+        explanation += "s." if comparison_count != 1 else "."
     if clinical.red_flags:
-        pieces.append("red_flags=" + ",".join(clinical.red_flags[:4]))
+        explanation += " Key concerns included " + ", ".join(clinical.red_flags[:4]) + "."
     if clinical.missing_information:
-        pieces.append("missing=" + ",".join(clinical.missing_information[:4]))
+        explanation += " Missing information that could affect confidence included "
+        explanation += ", ".join(clinical.missing_information[:4]) + "."
     if pairwise_failure:
-        pieces.append(f"pairwise_failure={pairwise_failure}")
-    if needs_review:
-        pieces.append("route=ct_escalation_agent")
-    return "; ".join(pieces)
+        explanation += f" Human review was required because pairwise comparison failed: {pairwise_failure}."
+    elif needs_review:
+        explanation += " Human review was requested because the moderator was not confident enough to place it automatically."
+    return explanation
 
 
 def _string_or_none(value: Any) -> str | None:

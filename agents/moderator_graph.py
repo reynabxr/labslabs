@@ -11,6 +11,7 @@ from pydantic import SecretStr
 
 from .moderator_logic import (
     needs_human_review,
+    needs_precomparison_escalation,
     pairwise_case_from_record,
     placement_from_insertion_index,
     queue_context_item,
@@ -96,6 +97,7 @@ def moderate_case(
 def build_moderator_graph():
     graph = StateGraph(ModeratorState)
     graph.add_node("ingest_case", ingest_case)
+    graph.add_node("check_escalation", check_escalation)
     graph.add_node("load_queue", load_queue)
     graph.add_node("initialize_search", initialize_search)
     graph.add_node("binary_search_compare", binary_search_compare)
@@ -103,7 +105,15 @@ def build_moderator_graph():
     graph.add_node("emit_result", emit_result)
 
     graph.set_entry_point("ingest_case")
-    graph.add_edge("ingest_case", "load_queue")
+    graph.add_edge("ingest_case", "check_escalation")
+    graph.add_conditional_edges(
+        "check_escalation",
+        _precomparison_escalation_route,
+        {
+            "emit_result": "emit_result",
+            "load_queue": "load_queue",
+        },
+    )
     graph.add_edge("load_queue", "initialize_search")
     graph.add_conditional_edges(
         "initialize_search",
@@ -135,6 +145,39 @@ def ingest_case(state: ModeratorState) -> ModeratorState:
     state["comparison_history"] = []
     state["pairwise_failure"] = None
     return state
+
+
+def check_escalation(state: ModeratorState) -> ModeratorState:
+    new_case = cast(PairwiseCase, _state_value(state, "new_case"))
+    if needs_precomparison_escalation(new_case):
+        state["needs_human_review"] = True
+        state["placement_action"] = "hold_and_escalate"
+        state["anchor_case_id"] = None
+        state["insertion_index"] = 0
+        state["queue_snapshot"] = []
+        state["queue_cases"] = []
+        state["comparison_history"] = []
+        reason = "force_escalation=True" if new_case.force_escalation else f"validation_status={new_case.validation_status}"
+        if new_case.force_escalation:
+            state["reason_summary"] = (
+                "This case was sent for human review before pairwise comparison because it was explicitly flagged for escalation."
+            )
+        else:
+            state["reason_summary"] = (
+                "This case was sent for human review before pairwise comparison because its input validation was incomplete."
+            )
+        logger.info(
+            "MODERATOR_PRECOMPARISON_ESCALATION case_id=%s reason=%s",
+            new_case.case_id,
+            reason,
+        )
+    return state
+
+
+def _precomparison_escalation_route(state: ModeratorState) -> str:
+    if bool(state.get("needs_human_review")) and state.get("placement_action") == "hold_and_escalate" and not state.get("queue_cases"):
+        return "emit_result"
+    return "load_queue"
 
 
 def load_queue(state: ModeratorState) -> ModeratorState:

@@ -344,8 +344,7 @@ def _invoke_structured_llm(state: ReviewGraphState) -> ClinicalUrgencyMessage:
     if not isinstance(content, str):
         content = str(content)
     payload = parse_json_object(content)
-    case = _require_case(state)
-    payload = _merge_case_identity(payload, case)
+    payload = _normalize_llm_payload(payload, state)
     return ClinicalUrgencyMessage.model_validate(payload)
 
 
@@ -376,14 +375,56 @@ def _dedupe(values: list[str]) -> list[str]:
     return deduped
 
 
-def _merge_case_identity(payload: dict[str, Any], case: CaseMessage) -> dict[str, Any]:
-    """Restore immutable identifiers from the source case before validation."""
+def _normalize_llm_payload(
+    payload: dict[str, Any],
+    state: ReviewGraphState,
+) -> dict[str, Any]:
+    """Restore required schema fields and immutable identifiers before validation."""
+    case = _require_case(state)
     merged = dict(payload)
     merged.setdefault("message_type", "clinical_urgency")
     merged["case_id"] = case.case_id
     merged["patient_code"] = case.patient_code
+    if "clinical_urgency" not in merged and "urgency" in merged:
+        merged["clinical_urgency"] = merged.pop("urgency")
+    if "clinical_urgency" not in merged:
+        confidence_value = merged.get("confidence")
+        if isinstance(confidence_value, str) and confidence_value.strip().upper() in {
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "CRITICAL",
+        }:
+            merged["clinical_urgency"] = confidence_value.strip().upper()
+            merged["confidence"] = _require_confidence(state)
+    if "reasoning_summary" not in merged:
+        for alias in ("summary", "reasoning", "explanation", "analysis"):
+            value = merged.get(alias)
+            if value not in (None, ""):
+                merged["reasoning_summary"] = str(value)
+                break
+    merged.setdefault("clinical_urgency", _require_urgency(state))
+    merged["confidence"] = _coerce_confidence(merged.get("confidence"), state)
+    merged.setdefault("red_flags", state.get("red_flags", []))
+    merged.setdefault("missing_information", state.get("missing_information", []))
+    merged.setdefault("reasoning_summary", _require_reasoning_summary(state))
+    merged.setdefault("recommended_next_route", "moderator")
     return merged
 
 
 def _is_blank(value: Any) -> bool:
     return value in (None, "") or str(value).strip() == ""
+
+
+def _coerce_confidence(value: Any, state: ReviewGraphState) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            pass
+        if cleaned.upper() in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+            return _require_confidence(state)
+    return _require_confidence(state)

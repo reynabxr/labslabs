@@ -16,7 +16,7 @@ from thenvoi_rest import (
     ParticipantRequest,
 )
 
-from storage.queue_store import expire_human_reviews, get_case, get_next_pending_case
+from storage.queue_store import get_case, get_next_pending_case
 
 os.environ["SSL_CERT_FILE"] = certifi.where()
 
@@ -31,12 +31,18 @@ def _required_env(name: str) -> str:
 
 
 async def dispatch_next_pending_case() -> dict[str, Any] | None:
-    expired_cases = expire_human_reviews()
-    if expired_cases:
-        logger.info("HUMAN_REVIEW_EXPIRED case_ids=%s", ",".join(expired_cases))
     pending_case = get_next_pending_case()
     if pending_case is None:
         logger.info("No dispatchable pending cases remain.")
+        return None
+
+    return await dispatch_case(pending_case.case_id)
+
+
+async def dispatch_case(case_id: str) -> dict[str, Any] | None:
+    pending_case = get_case(case_id)
+    if pending_case is None:
+        logger.info("No dispatchable case found for case_id=%s.", case_id)
         return None
 
     logger.info("CASE_LOADED case_id=%s status=%s", pending_case.case_id, pending_case.status)

@@ -4,35 +4,22 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from .moderator_schema import ModeratorDecisionMessage
-from .shared_schema import HumanHandoffMessage, ReviewMessage
+from .shared_schema import HumanHandoffMessage
 
 
 def create_human_handoff(
-    review: ReviewMessage | ModeratorDecisionMessage,
+    decision: ModeratorDecisionMessage,
 ) -> HumanHandoffMessage:
-    due_at = _human_due_at()
-    clinical_risk = (
-        review.clinical_risk
-        if isinstance(review, ReviewMessage)
-        else review.clinical_urgency
-    )
-    reason = (
-        review.review_reasoning_summary
-        if isinstance(review, ReviewMessage)
-        else review.reason_summary
-    )
-    summary = review.summary if isinstance(review, ReviewMessage) else review.reason_summary
     return HumanHandoffMessage(
-        case_id=review.case_id,
-        patient_code=review.patient_code,
-        clinical_risk=clinical_risk,
-        confidence=review.confidence,
-        proposed_rank=None if isinstance(review, ModeratorDecisionMessage) else review.proposed_rank,
-        queue_action=review.placement_action if isinstance(review, ModeratorDecisionMessage) else review.queue_action,
-        queue_assessment="NEEDS_HUMAN_REVIEW" if isinstance(review, ModeratorDecisionMessage) else review.queue_assessment,
-        reason=reason or clinical_risk,
-        summary=summary,
-        due_at=due_at,
+        case_id=decision.case_id,
+        patient_code=decision.patient_code,
+        clinical_urgency=decision.clinical_urgency,
+        confidence=decision.confidence,
+        queue_action=decision.placement_action,
+        queue_assessment="NEEDS_HUMAN_REVIEW",
+        reason=decision.reason_summary,
+        summary=decision.reason_summary,
+        due_at=None,
     )
 
 

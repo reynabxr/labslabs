@@ -328,6 +328,8 @@ def enqueue_case(
                 "arrival_seq": arrival_seq,
                 "enqueue_tick": simulation_tick,
                 "queue_position": tail_position,
+                "source": "human_review_return" if (payload or {}).get("human_review_decision") == "return_to_review" else "simulation",
+                "human_review_notes": (payload or {}).get("human_review_notes"),
             },
         )
         connection.commit()
@@ -1115,6 +1117,7 @@ def _apply_queue_placement(
         ]
 
         _set_queue_version(connection, queue_version)
+        from_rank = int(case_row["queue_rank"]) if case_row is not None and case_row["queue_rank"] is not None else None
         _log_event(
             connection,
             queue_version=queue_version,
@@ -1127,6 +1130,7 @@ def _apply_queue_placement(
                 "anchor_case_id": anchor_case_id,
                 "requested_position": target_position,
                 "applied_position": bounded_position,
+                "from_rank": from_rank,
                 "decision_payload": decision,
             },
         )

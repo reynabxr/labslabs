@@ -5,35 +5,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from .router_schema import CaseMessage
-
-
-class ReviewMessage(BaseModel):
-    message_type: str = Field(default="review")
-    case_id: str
-    patient_code: str
-    clinical_risk: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-    confidence: float
-    queue_assessment: Literal[
-        "APPROPRIATE",
-        "UNDER_RANKED",
-        "OVER_RANKED",
-        "NEEDS_HUMAN_REVIEW",
-    ]
-    proposed_rank: int | None = None
-    queue_action: Literal["insert", "move_up", "stay_put", "escalate"]
-    affected_case_ids: list[str] = Field(default_factory=list)
-    needs_human_review: bool
-    summary: str
-    recommended_next_route: Literal["final_result", "human_review"]
-    review_reasoning_summary: str | None = None
-
 
 class HumanHandoffMessage(BaseModel):
     message_type: str = Field(default="human_handoff")
     case_id: str
     patient_code: str
-    clinical_risk: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    clinical_urgency: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
     confidence: float
     proposed_rank: int | None = None
     queue_action: str
@@ -45,7 +22,7 @@ class HumanHandoffMessage(BaseModel):
         default_factory=lambda: ["approve", "return_to_review"]
     )
     decision_prompt: str = Field(
-        default="Use scripts/human_decision.py to approve or return the case before due_at."
+        default="Use scripts/human_decision.py to approve or return the case to review."
     )
 
 

@@ -12,7 +12,6 @@ from .router_logic import (
     to_case_message,
 )
 from .shared_schema import model_to_json
-from storage.queue_engine import recompute_queue
 from storage.queue_store import get_case, mark_routed, update_case_payload
 
 logger = logging.getLogger(__name__)
@@ -98,10 +97,6 @@ class CTRouterAdapter(SimpleAdapter[HistoryProvider]):
             update_case_payload(
                 normalized_case.case_id,
                 normalized_case.model_dump(),
-            )
-            recompute_queue(
-                reason="case_normalized",
-                trigger_case_id=normalized_case.case_id,
             )
 
         decision = build_router_decision(normalized_case)
