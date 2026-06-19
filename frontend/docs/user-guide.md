@@ -1,12 +1,12 @@
-# User Guide: Agent - Agentic AI CT Prioritisation
+# User Guide: TriageFlow
 
-Welcome to the **Agent - Agentic AI CT Prioritisation** dashboard. This tool is designed to assist hospital radiology departments in managing CT scan workflows more efficiently. By using real-time AI, the platform helps you identify which patients need scanning most urgently based on clinical symptoms, wait times, and hospital demand.
+Welcome to **TriageFlow**, a dashboard designed to assist hospital radiology departments in managing CT scan workflows more efficiently. By using real-time AI, the platform helps you identify which patients need scanning most urgently based on clinical symptoms, wait times, and hospital demand.
 
 ---
 
 ## 1. Overview
 
-Agent is an AI-driven assistant that dynamically re-orders the CT queue. It analyzes patient data and hospital conditions to ensure that the most critical patients are seen first, helping clinical teams meet target scan times and improve patient outcomes.
+TriageFlow is an AI-driven assistant that dynamically re-orders the CT queue. It analyzes patient data and hospital conditions to ensure that the most critical patients are seen first, helping clinical teams meet target scan times and improve patient outcomes.
 
 ## 2. Who Should Use This Dashboard
 
