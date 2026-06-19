@@ -1,5 +1,7 @@
 # TriageFlow — Agentic Queue Prioritization
 
+![TriageFlow Banner](banner.jpg)
+
 A research prototype demonstrating how agentic AI workflows can intelligently prioritize medical imaging queues while maintaining human oversight. TriageFlow shows that autonomous agents can make nuanced clinical and operational decisions, but only when they operate within a human-centered feedback loop.
 
 ## The Problem
@@ -141,7 +143,4 @@ This work is inspired by:
 
 This is a research prototype. Issues, PRs, and discussions about the architecture are welcome.
 
-## License
-
-See LICENSE (if applicable).
 
