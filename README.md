@@ -132,15 +132,4 @@ Then open the dashboard and run a simulation to see the agents in action.
 └── agent_config.yaml  # Agent tuning parameters
 ```
 
-## Papers & References
-
-This work is inspired by:
-- **LangGraph** (LangChain) — Stateful agent orchestration
-- **Band** — Multi-agent coordination framework
-- **Triage systems in emergency medicine** — The human context we're trying to capture
-
-## Contributing
-
-This is a research prototype. Issues, PRs, and discussions about the architecture are welcome.
-
 
